@@ -1,0 +1,78 @@
+---
+title: "Business Quality Index"
+author: "MDS. René Rosado González"
+output: 
+  html_document:
+    theme: paper
+    highlight: haddock
+---
+
+```{r setup, include=FALSE, fig.fullwidth=TRUE, out.width = '100%'}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r librerías, message=FALSE, warning=FALSE, echo=FALSE}
+library(tidyverse)                                              
+library(sf)             
+library(tmap)
+library(tmaptools)
+
+# Loading a shape file
+imuc = read_sf('~/Desktop/ITESM/Cursos/TC2001B/data/imuc/colonias_imc2020.shp') %>% 
+  st_make_valid()
+
+data = read_csv('data/results.csv', locale = locale(encoding = "latin1")) %>% 
+  st_as_sf(coords = c("longitud", "latitud"), crs = 4326) %>% 
+  st_transform(crs = st_crs(imuc))
+
+poligonos = read_sf('data/poligonos/00mun.shp') %>% 
+  filter(CVE_ENT %in% c('08','09','11','14','19','22'))
+
+mun = st_join(
+  imuc,
+  data
+) %>% 
+  st_drop_geometry() %>% 
+  with_groups(
+    .groups = c(CVE_ENT,CVE_MUN,CVE_COL,NOM_ENT, NOM_MUN,),
+    summarise,
+    quality_index = mean(probability_1),
+    n = n()
+  ) %>% 
+  mutate(
+    n = if_else(is.na(quality_index),0, n),
+    quality_index = coalesce(quality_index, 0),
+    cohort_potential = n * quality_index,
+    quality_index = quality_index * 100
+  )
+
+maps = imuc %>% 
+  select(CVE_ENT,CVE_MUN,CVE_COL,NOM_ENT, NOM_MUN, COLONIA, CP) %>% 
+  left_join(mun)
+
+
+mapa = maps %>% 
+  filter(CVE_ENT %in% c('08','09','11','14','19','22')) %>% 
+  tm_shape() +
+  tm_fill(
+    col = "quality_index",
+    id = "COLONIA", 
+    title = "Business Quality Index",
+    popup.vars = c(
+      "Municipio" = "NOM_MUN",
+      "Entidad"="NOM_ENT",
+      "Business Quality Index" = "quality_index",
+      "Number of Business" = "n",
+      "Cohort Potencial" = "cohort_potential"
+      ),
+    popup.format=list(quality_index=list(digits=2),
+                      cohort_potential = list(digits = 0)),
+    palette = c("gray80", "#D11E7C"),
+    lwd = 0.05,
+    ) +
+  tm_shape(poligonos) +
+  tm_borders(lwd = 0.5)
+mapa = tmap_leaflet(mapa)
+tmap_mode("view")
+mapa                                                 
+```
+

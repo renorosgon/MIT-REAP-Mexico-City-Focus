@@ -1,0 +1,271 @@
+---
+title: "Mexico City Industrial Competitiveness"
+subtitle: "MIT REAP: Mexico City Focuse"
+author: "MDS. René Rosado González\nTecnologico de Monterrey"
+output: 
+  html_document:
+    theme: paper
+    highlight: haddock
+---
+
+```{r setup, include = FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+setwd("~/Desktop/ITESM/MIT REAP/")
+
+# Instal - load tidyverse                                                       
+if(require(tidyverse) == FALSE){                                                
+  install.packages('tidyverse')                                                 
+  library(tidyverse)                                                            
+}else{                                                                          
+  library(tidyverse)                                                            
+}
+
+# Instal - load plotly                                                
+if(require(plotly) == FALSE){                                                
+  install.packages('plotly')                                                 
+  library(plotly)                                                            
+}else{                                                                          
+  library(plotly)                                                            
+}
+
+#  Instal - DT                                                     
+if(require(DT) == FALSE){                                                
+  install.packages('DT')                                                 
+}  
+
+# Instal - load rvest                                                       
+if(require(rvest) == FALSE){                                                
+  install.packages('rvest')                                                 
+  library(rvest)                                                            
+}else{                                                                          
+  library(rvest)                                                            
+}         
+
+# Instal - load httr                                                       
+if(require(httr) == FALSE){                                                
+  install.packages('httr')                                                 
+  library(httr)                                                            
+}else{                                                                          
+  library(httr)                                                            
+}    
+
+# Instal  rjson                                                       
+if(require(rjson) == FALSE){                                                
+  install.packages('rjson')                                                 
+}
+```
+
+```{r get_data, include = FALSE, warning=FALSE}
+# Load Economic Census
+mexico_city_economic_census = read_csv("data/raw/censos_economicos/conjunto_de_datos/ce2019_cdmx.csv") %>% 
+  # Clean names
+  janitor::clean_names() %>% 
+  # Keep industry level and non firms size strata
+  filter(nchar(codigo) == 6, is.na(id_estrato)) %>% 
+  # Get ids
+  mutate(
+    entidad = as.numeric(entidad),
+    sector_id = str_extract(codigo,'\\d{2}'),
+    subsector_id = str_extract(codigo,'\\d{3}'),
+    industry_group_id = str_extract(codigo,'\\d{4}'),
+    naics_industry_id = str_extract(codigo,'\\d{5}')) %>%
+  # Select relevant variables
+  select(
+    state_id = entidad, 
+    municipality_id = municipio,
+    national_industry_id = codigo, 
+    sector_id:industry_group_id,
+    economic_units = ue, 
+    gross_production = a111a, 
+    gross_added_value = a131a,
+    total_expenses = a700a,
+    total_income = a800a,
+    employees = h001a,
+    worked_hours = h001d)  %>% 
+  # Create new variables
+  mutate(gav_per_worked_hour = 1000 * gross_added_value/worked_hours,
+         productivity = 1000 * gross_production/worked_hours) %>% 
+  # Keep only city aggregates
+  subset(is.na(municipality_id)) %>% 
+  # Get rid of the municipality column
+  mutate(municipality_id = NULL)
+
+# Get data from Data Mexico
+# Economic Complexity Index (ECI) by municipality
+economic_complexity_index_municipality = GET(
+  # Set GET request
+  url = "https://datamexico.org/api/data?Quarter=20214&cube=complexity_eci&drilldowns=ECI+Ranking,Municipality&measures=ECI&parents=false&sparse=false&locale=es") %>% 
+  # Read the request and strucutre de json data into tidyformat
+  read_html() %>% html_text() %>% rjson::fromJSON() %>% .[['data']] %>%
+  # Bind rows into a tibble and clean names
+  bind_rows() %>% janitor::clean_names() %>% 
+  # Rename the ECI column
+  rename(economic_complexity_index = eci)
+
+# Economic Activities Complexity Index (ACI)
+activities_complexity_index = GET(
+  # Set GET request
+  url = "https://datamexico.org/",
+  path = "api/stats/pci",
+  query = list(
+    cube="inegi_denue",
+    Month="20211117,20210510,20201119",
+    rca="State,National Industry,Number of Employees Midpoint",
+    threshold="National Industry:900,State:900",
+    locale="en"
+  )) %>% 
+  # Read the request and strucutre de json data into tidyformat
+  read_html() %>% html_text() %>% rjson::fromJSON() %>% .[['data']] %>%
+  # Bind rows into a tibble and clean names
+  bind_rows() %>% janitor::clean_names() %>% 
+  # Rename the ACI column
+  rename(activities_complexity_index = number_of_employees_midpoint_pci)
+
+
+# Mexico City Relative Comparative Advantage (RCA) - Data Mexico
+relative_comparative_advantage_cdmx = GET(
+  # Set GET request
+  url = "https://datamexico.org/",
+  path = "api/stats/relatedness",
+  query = list(
+    cube="inegi_denue",
+    Month="20211117,20210510,20201119",
+    rca="State,National Industry,Number of Employees Midpoint",
+    parents="true",
+    filter_State="9",
+    threshold="National Industry:900,State:900",
+    locale="en"
+  )) %>% 
+  # Read the request and strucutre de json data into tidyformat
+  read_html() %>% html_text() %>% rjson::fromJSON() %>% .[['data']] %>%
+  # Bind rows into a tibble and clean names
+  bind_rows() %>% janitor::clean_names() %>% 
+  # Rename relevant columns
+  rename(employees_number = number_of_employees_midpoint,
+         affinity = number_of_employees_midpoint_relatedness,
+         relative_comparative_advantage = number_of_employees_midpoint_rca)
+
+# Join all data
+industry_advantages = activities_complexity_index %>% 
+  inner_join(relative_comparative_advantage_cdmx, by = c("national_industry_id", "national_industry")) %>% 
+  left_join(mexico_city_economic_census, by = c("national_industry_id", "state_id", "sector_id", 
+                               "subsector_id", "industry_group_id")) %>% 
+  # Clean and order date
+  mutate(state_id = paste0('0',state_id)) %>% 
+  select(state_id, state, sector_id, sector, subsector_id, subsector, 
+         industry_group, industry_group_id, naics_industry_id, naics_industry,
+         national_industry_id, national_industry, employees_number,
+         activities_complexity_index, affinity, relative_comparative_advantage,
+         gross_production:total_income,worked_hours:productivity
+         ) %>% 
+  mutate_if(is.numeric,round,2) %>% 
+  # Order by Relative Competitive Advantage
+  arrange(desc(relative_comparative_advantage))
+```
+
+
+### Metrics for the assesment
+
+This report analyze which economic activities have the highest potential to boost innovation and entrepreneurial development in Mexico City. In order to do so, the three following metrics are taken into account.
+
+1. **Economic Complexity** uses data on the geography of economic activities to infer the presence of capabilities. This capabilities are summarized in the **The Economic Complexity Index (ECI)**. 
+
+2. **Affinity (relatedness)** measures the probability of a city, or region to adopt a certain economic activity (a new product, industry, technology). According to this principle, the probabilities of a city developing a new industry increases with the number of related activities present in that location. This principle can be used to predict which activities are most likely to emerge - or disappear - in a city.
+
+3. **Revealed Comparative Advantage (RCA)** measures the degree of specialization of a certain region. The RCA is equal to the proportion of exports of a certain product, divided by the proportion of world exports of this product. If the RCA value of a certain activity is higher than 1, then the territory is a specialist in its production.
+
+The following table presents the economic activities avaiblable in Mexico City. They are ordered from the highest to the lowest RCA. 
+
+```{r table, echo = FALSE, warning = FALSE}
+DT::datatable(industry_advantages, 
+              colnames=c("State ID", "State", "Sector ID", "Sector", "Subsector ID", "Subsector", "Industry Group ID", "Industry Group", "NAICS ID", "NAICS", "Industry ID", "Industry", "Midpoint Employees", "Activity Complexity (ACI)", "Affinity (Relatedness)", "Relative Comparative Advantege (RCA)", "Gross Production (Million MXN)", "Gross Added Value (GAV in million MXN)", "Total Expenses (Million MXN)", "Total Income (Million MXN)", "Worked Hours (Thousands)","GAV per Worked Hour (MXN)", "Productivity (MXN)"),
+              width = '100%', 
+              options = list(scrollX = TRUE))
+```
+
+Here are some visualizations to facilitate your analysis:
+
+```{r plot_1, echo = FALSE, warning = FALSE, out.width="100%", out.height="100%"}
+
+hline = function(y = 1) {
+  list(
+    type = "line",
+    x0 = 0,
+    x1 = 1,
+    xref = "paper",
+    y0 = y,
+    y1 = y,
+    line = list(color = "gray50", dash="dot", with = 0.75)
+  )
+}
+
+plot_ly(data = industry_advantages) %>% 
+  add_trace( 
+    type = "scatter", 
+    mode = "markers",
+    x = ~activities_complexity_index,
+    y = ~relative_comparative_advantage, 
+    hoverinfo = list(type='text'),
+    text = ~paste(national_industry,
+                  "<br>Midpoint Employees: ", employees_number, 
+                  '<br>Comparative Advantage:', round(relative_comparative_advantage,2),
+                  '<br>Gross Production: ', round(gross_production,2),
+                  '<br>Gross Added Value: ', round(gross_added_value,2),
+                  '<br>GAV per Worked Hour: ', round(gav_per_worked_hour,2)),
+    color = ~affinity, 
+    colors='Reds',
+    showlegend = FALSE,
+    size=~employees_number,
+    sizes = c(10, 50),
+    showlegend = F,
+    marker = list(
+      line = list(color = "black",width = 1), 
+      sizemode = 'diameter',showscale = FALSE
+      )
+    #width = 1280, height = 800, 
+    ) %>% 
+  layout(
+    title = list(text = "Mexico City Industrial Complexity"), 
+    font  = list(family = "Montserrat", size = 12, color = "gray10"), 
+    xaxis = list(title = list(text ='Economic Activities Complexity'),
+                 showgrid = FALSE),
+    yaxis = list(title = list(text ='Comparative Advantage'),
+                 zeroline = FALSE, showgrid = FALSE),
+    shapes = list(hline(1)),
+    margin = list(l = 50,r = 50,b = 100,t = 100, pad = 5)
+         ) %>% 
+  colorbar(title = "Affinity\n(relatedness)",
+           tickfont = list(size = 12),
+           line = list(color = 'white'))
+
+```
+
+```{r plot_2, echo = FALSE, warning = FALSE, out.width="100%", out.height="100%"}
+
+economic_complexity_index_municipality %>% 
+  head(200) %>% 
+  mutate(cdmx = if_else(str_detect(municipality_id,'^9'),'CDMX','Other')) %>% 
+  plot_ly() %>% 
+  add_trace( 
+    type = "bar", 
+    x = ~eci_ranking,
+    y = ~economic_complexity_index, 
+    hoverinfo = list(type='text'),
+    text = ~paste(municipality,
+                  "<br>Municipality ID: ", municipality_id, 
+                  '<br>ECI:', round(economic_complexity_index,2)
+                  ),
+    color = ~cdmx
+    ) %>% 
+  layout(
+    title = list(text = "Top 200 - Most Complex Mexican Municipalities"), 
+    font  = list(family = "Montserrat", size = 12, color = "gray10"), 
+    xaxis = list(title = list(text ='Municipalities'),
+                 showgrid = FALSE),
+    yaxis = list(title = list(text ='ECI'),
+                 zeroline = FALSE, showgrid = FALSE),
+    margin = list(l = 50,r = 50,b = 100,t = 100, pad = 5)
+         )
+
+```
